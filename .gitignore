@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+*.so
+*.dylib
+
+# CUDA builds
+asann_cuda/build/
+asann_cuda/dist/
+asann_cuda/*.egg-info/
+*.cu.o
+*.fatbin
+
+# PyTorch models and checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Data (hosted on Figshare)
+data/
+data.zip
+
+# Experiment results and data (hosted on Figshare)
+experiments/results/
+experiments/results.7z
+experiments/data/
+experiments/tier_7/data/
+
+# Article manuscript, figures, and documents (not part of code release)
+sections/
+tem_figures/
+*.pdf
+*.ai
+*.svg
+*.png
+*.docx
+*.xlsx
+*.csv
+*.tex
+*.md
+*.tmp
+*.7z
+*.zip
+*.h5ad
+*.pkl
+*.tab
+~$*
+
+# Except README.md
+!README.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Pytest
+.pytest_cache/
+
+# R scripts (figure generation)
+*.R
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+*.log
+
+# Claude
+.claude/
