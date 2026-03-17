@@ -18,11 +18,18 @@ Data Pipeline:
 """
 
 import os
+import sys
 import pickle
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset, Dataset
 from typing import Dict, List, Tuple, Optional
+
+# Ensure project root is on path so asann can be imported
+_proj_root = os.path.join(os.path.dirname(__file__), "..", "..")
+if _proj_root not in sys.path:
+    sys.path.insert(0, _proj_root)
+import asann  # noqa: F401  — activates compat shim so torch.load() can unpickle old 'csann' models
 
 # PyTorch 2.8+ defaults weights_only=True which breaks OGB/PyG data loading.
 # Monkey-patch to use weights_only=False by default.

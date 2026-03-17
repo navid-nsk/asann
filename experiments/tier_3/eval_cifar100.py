@@ -28,6 +28,7 @@ import json
 import time
 import torch
 import numpy as np
+import asann  # noqa: F401  — activates compat shim so torch.load() can unpickle old 'csann' models
 import torchvision
 from sklearn.model_selection import train_test_split
 

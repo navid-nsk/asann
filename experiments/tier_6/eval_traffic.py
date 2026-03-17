@@ -22,6 +22,7 @@ if _proj_root not in sys.path:
 
 import torch
 import numpy as np
+import asann  # noqa: F401  — activates compat shim so torch.load() can unpickle old 'csann' models
 from pathlib import Path
 
 from common import setup_paths

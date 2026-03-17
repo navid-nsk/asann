@@ -25,6 +25,7 @@ import numpy as np
 import torchvision
 from sklearn.model_selection import train_test_split
 from common import get_device, evaluate_classification_model
+import asann  # noqa: F401  — activates compat shim so torch.load() can unpickle old 'csann' models
 
 
 def main():
