@@ -41,7 +41,6 @@ from common import (
     resume_or_create_trainer,
 )
 from asann import ASANNConfig, ASANNModel, ASANNTrainer
-from asann.asann_optimizer import ASANNOptimizerConfig
 
 
 def run_experiment(results_dir: str):
@@ -193,63 +192,22 @@ def run_experiment(results_dir: str):
     print(f"  Molecular batch: {mol_batch.num_graphs} molecules, "
           f"{mol_batch.x.shape[0]} atoms, {mol_batch.edge_index.shape[1]} bonds")
 
-    # ===== 4. Create mini-batch dataloaders with molecule indices =====
-    batch_size = 128
+    # ===== 4. Configure ASANN =====
+    config = ASANNConfig.from_task(
+        task_type="classification",
+        modality="molecular_classification",
+        d_input=split_data["d_input"],
+        d_output=n_classes,
+        n_samples=len(split_data["X_train"]),
+        device=device,
+    )
+    batch_size = config.recommended_batch_size
+
+    # ===== 5. Create mini-batch dataloaders with molecule indices =====
     loaders = create_mol_dataloaders_classification(split_data, batch_size=batch_size)
     steps_per_epoch = len(loaders["train"])
     print(f"  DataLoaders: batch_size={batch_size}, "
           f"steps/epoch={steps_per_epoch}")
-
-    # ===== 5. Configure ASANN =====
-    config = ASANNConfig(
-        encoder_candidates=["molecular_graph"],
-        d_init=64,
-        initial_num_layers=2,
-
-        # Molecular graph encoder config -- GINE with 2D features
-        # NOTE: 5L x 128d was worse (0.62 vs 0.67). Keep 3L x 64d.
-        encoder_mol_gnn_type="gine",
-        encoder_mol_hidden_dim=64,
-        encoder_gnn_layers=3,
-        encoder_switch_warmup_epochs=10,
-
-        # Auto complexity scaling
-        complexity_target_auto=True,
-        complexity_ceiling_mult=5.0,
-        hard_max_multiplier=2.0,
-
-        # Epoch-based diagnosis
-        diagnosis_enabled=True,
-        warmup_epochs=20,
-        surgery_epoch_interval=5,
-        eval_epoch_interval=2,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=15,
-        recovery_epochs=6,
-
-        # Very relaxed overfitting thresholds -- scaffold split inherently
-        # causes large train/val gap; don't diagnose this as overfitting
-        overfitting_gap_early=1.0,
-        overfitting_gap_moderate=2.0,
-        overfitting_gap_severe=5.0,
-
-        # More patience -- let training run longer
-        max_treatment_escalations=10,
-        treatment_exhaustion_patience=10,
-        stalled_convergence_patience=80,
-        stalled_convergence_min_epochs=200,
-        auto_stop_enabled=False,                 # Don't stop early
-
-        max_ops_per_layer=4,
-        mixup_enabled=False,
-        drop_path_enabled=False,
-
-        device=device,
-        optimizer=ASANNOptimizerConfig(
-            base_lr=3e-4,
-            weight_decay=0.01,
-        ),
-    )
 
     # ===== 6. Compute class weights for imbalanced data =====
     y_train_np = split_data["y_train"].numpy()
@@ -290,7 +248,7 @@ def run_experiment(results_dir: str):
     model.set_molecular_graphs(reordered_graphs)
 
     # ===== 8. Train =====
-    max_epochs = 500
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs "
           f"(~{max_epochs * steps_per_epoch} steps)...")
     train_metrics = trainer.train_epochs(

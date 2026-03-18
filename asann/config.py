@@ -524,3 +524,612 @@ class ASANNConfig:
         # Spatial models benefit from true multi-scale smoothing: fast/medium/slow.
         if self.spatial_shape is not None and self.optimizer.betas == (0.9, 0.9, 0.9, 0.999):
             self.optimizer.betas = (0.9, 0.95, 0.99, 0.999)
+
+    # ------------------------------------------------------------------
+    #  Auto-configuration from task descriptors
+    # ------------------------------------------------------------------
+    _VALID_MODALITIES = {
+        "tabular", "image", "pde", "graph", "temporal_graph",
+        "molecular", "molecular_classification",
+        "pharmacogenomic", "leukemia",
+    }
+
+    @classmethod
+    def from_task(
+        cls,
+        task_type: str,
+        modality: str,
+        d_input: int,
+        d_output: int,
+        n_samples: int,
+        spatial_shape: Optional[Tuple[int, int, int]] = None,
+        n_features: Optional[int] = None,
+        *,
+        device: str = "auto",
+    ) -> "ASANNConfig":
+        """Create a fully configured ASANNConfig from task descriptors only.
+
+        This method deterministically derives every hyperparameter from the
+        task description so that no per-experiment tuning is required.
+
+        Parameters
+        ----------
+        task_type : str
+            ``"regression"`` or ``"classification"``.
+        modality : str
+            One of: ``"tabular"``, ``"image"``, ``"pde"``, ``"graph"``,
+            ``"temporal_graph"``, ``"molecular"``,
+            ``"molecular_classification"``, ``"pharmacogenomic"``,
+            ``"leukemia"``.
+        d_input : int
+            Input dimensionality (number of features for tabular, flattened
+            size for images, number of input coordinates for PDEs).
+        d_output : int
+            Output dimensionality (1 for scalar regression, number of
+            classes for classification).
+        n_samples : int
+            Number of training samples.
+        spatial_shape : tuple of int, optional
+            ``(C, H, W)`` for image modalities.
+        n_features : tuple of int, optional
+            Number of node features for graph modalities.
+        device : str
+            Device string (default ``"auto"``).
+
+        Returns
+        -------
+        ASANNConfig
+            A fully configured instance.  Two extra attributes are set on
+            the returned object: ``recommended_max_epochs`` and
+            ``recommended_batch_size``.
+        """
+        # --- validation ---
+        assert task_type in ("regression", "classification"), \
+            f"task_type must be 'regression' or 'classification', got '{task_type}'"
+        assert modality in cls._VALID_MODALITIES, \
+            f"modality must be one of {cls._VALID_MODALITIES}, got '{modality}'"
+        if modality == "image":
+            assert spatial_shape is not None, "spatial_shape required for image modality"
+
+        H = spatial_shape[1] if spatial_shape is not None else 0
+
+        # ================================================================
+        #  1. Architecture: d_init, initial_num_layers
+        # ================================================================
+        if modality == "graph":
+            d_init = 16
+        elif modality == "temporal_graph":
+            d_init = 64
+        elif modality == "tabular":
+            if d_input < 30:
+                d_init = 32 if n_samples < 2000 else 48
+            else:
+                d_init = 64
+        elif modality == "image":
+            if H <= 28:
+                d_init = 32
+            elif H <= 32:
+                d_init = 96 if d_output <= 10 else 128
+            else:
+                d_init = 32
+        elif modality == "pde":
+            d_init = 48 if n_samples < 10000 else 64
+        elif modality in ("molecular", "molecular_classification"):
+            d_init = 64
+        elif modality == "pharmacogenomic":
+            d_init = 128
+        elif modality == "leukemia":
+            d_init = 64
+        else:
+            d_init = 32
+
+        if modality == "tabular":
+            initial_num_layers = 1 if task_type == "classification" else 2
+        elif modality == "image":
+            if H <= 28:
+                initial_num_layers = 2
+            elif H <= 32:
+                initial_num_layers = 1 if d_output <= 10 else 4
+            else:
+                initial_num_layers = 4
+        elif modality == "pde":
+            initial_num_layers = 3 if n_samples < 10000 else 4
+        elif modality == "graph":
+            initial_num_layers = 1
+        elif modality == "temporal_graph":
+            initial_num_layers = 3
+        elif modality in ("molecular", "molecular_classification"):
+            initial_num_layers = 2
+        elif modality == "pharmacogenomic":
+            initial_num_layers = 3
+        elif modality == "leukemia":
+            initial_num_layers = 3
+        else:
+            initial_num_layers = 2
+
+        # ================================================================
+        #  2. Complexity target & ceiling
+        # ================================================================
+        if modality in ("image", "graph", "temporal_graph", "molecular",
+                        "molecular_classification", "pharmacogenomic", "leukemia"):
+            complexity_target_auto = True
+            complexity_target = 10000.0
+        elif modality == "tabular":
+            complexity_target_auto = False
+            scale = max(1.0, min(d_input / 8.0, 10.0))
+            complexity_target = float(max(10000, min(int(n_samples * scale), 200000)))
+        elif modality == "pde":
+            complexity_target_auto = False
+            complexity_target = float(max(50000, min(n_samples * 4, 250000)))
+        else:
+            complexity_target_auto = True
+            complexity_target = 50000.0
+
+        if modality == "graph":
+            complexity_ceiling_mult = 2.8
+            hard_max_multiplier = 1.0
+        elif modality == "temporal_graph":
+            complexity_ceiling_mult = 5.0
+            hard_max_multiplier = 1.0
+        elif modality in ("molecular", "molecular_classification", "pharmacogenomic"):
+            complexity_ceiling_mult = 5.0
+            hard_max_multiplier = 2.0
+        elif modality == "image" and d_output >= 100:
+            complexity_ceiling_mult = 5.0
+            hard_max_multiplier = 1.0
+        elif modality == "image" and H > 28:
+            complexity_ceiling_mult = 3.0
+            hard_max_multiplier = 1.0
+        else:
+            complexity_ceiling_mult = 1.0
+            hard_max_multiplier = 1.0
+
+        complexity_target_multiplier = 8.0 if modality == "pharmacogenomic" else 5.0
+
+        # ================================================================
+        #  3. Encoder
+        # ================================================================
+        _ENCODER_MAP = {
+            "tabular": None,
+            "image": ["conv", "patch_embed"],
+            "pde": ["linear", "fourier"],
+            "graph": ["graph_node"],
+            "temporal_graph": ["temporal_graph"],
+            "molecular": ["molecular_graph"],
+            "molecular_classification": ["molecular_graph"],
+            "pharmacogenomic": ["dual_drug_cell"],
+            "leukemia": None,
+        }
+        encoder_candidates = _ENCODER_MAP.get(modality)
+
+        # Spatial / conv backbone
+        c_stem_init = 16
+        spatial_downsample_stages: Union[int, str] = 2
+        max_downsample_stages = 4
+        max_channels = 256
+        if spatial_shape is not None:
+            if H <= 28:
+                c_stem_init = 32
+                spatial_downsample_stages = 0
+            elif H <= 32:
+                c_stem_init = 128 if d_output >= 100 else 96
+                spatial_downsample_stages = "auto" if d_output <= 10 else 3
+                max_downsample_stages = 3
+                max_channels = 512 if d_output <= 10 else 256
+            else:
+                c_stem_init = 32
+                spatial_downsample_stages = 3
+                max_downsample_stages = 4
+
+        # Molecular encoder
+        encoder_gnn_layers = 3 if modality in ("molecular", "molecular_classification",
+                                                "pharmacogenomic") else 2
+        encoder_switch_warmup_epochs = 10 if modality in ("molecular", "molecular_classification",
+                                                           "pharmacogenomic") else 15
+
+        # ================================================================
+        #  4. Timing (epoch-based)
+        # ================================================================
+        if modality == "tabular":
+            warmup_epochs = 5
+            surgery_epoch_interval = 3
+            eval_epoch_interval = 2
+            meta_update_epoch_interval = 10
+        elif modality == "image":
+            warmup_epochs = 3 if H <= 28 else 5
+            surgery_epoch_interval = 2 if H <= 28 else (4 if d_output <= 10 else 5)
+            eval_epoch_interval = 1
+            meta_update_epoch_interval = 5 if H <= 28 else 8
+        elif modality == "pde":
+            warmup_epochs = 5
+            surgery_epoch_interval = 3
+            eval_epoch_interval = 2
+            meta_update_epoch_interval = 10
+        elif modality == "graph":
+            warmup_epochs = 5
+            surgery_epoch_interval = 11
+            eval_epoch_interval = 1
+            meta_update_epoch_interval = 10
+        elif modality == "temporal_graph":
+            warmup_epochs = 3
+            surgery_epoch_interval = 2
+            eval_epoch_interval = 5
+            meta_update_epoch_interval = 10
+        elif modality in ("molecular", "molecular_classification"):
+            warmup_epochs = 20
+            surgery_epoch_interval = 5
+            eval_epoch_interval = 2
+            meta_update_epoch_interval = 10
+        elif modality == "pharmacogenomic":
+            warmup_epochs = 5
+            surgery_epoch_interval = 3
+            eval_epoch_interval = 2
+            meta_update_epoch_interval = 10
+        elif modality == "leukemia":
+            warmup_epochs = 5
+            surgery_epoch_interval = 3
+            eval_epoch_interval = 2
+            meta_update_epoch_interval = 10
+        else:
+            warmup_epochs = 3
+            surgery_epoch_interval = 2
+            eval_epoch_interval = 1
+            meta_update_epoch_interval = 5
+
+        # Step-based fallbacks (estimated from sample count)
+        _batch_est = 256
+        _steps_per_epoch = max(1, n_samples // _batch_est)
+        surgery_interval_init = max(150, surgery_epoch_interval * _steps_per_epoch)
+        warmup_steps = max(300, warmup_epochs * _steps_per_epoch)
+        meta_update_interval = max(500, meta_update_epoch_interval * _steps_per_epoch)
+
+        # ================================================================
+        #  5. Diagnosis thresholds
+        # ================================================================
+        if modality in ("molecular", "molecular_classification"):
+            overfitting_gap_early = 1.0
+            overfitting_gap_moderate = 2.0
+            overfitting_gap_severe = 5.0
+        elif modality == "temporal_graph" and task_type == "regression":
+            overfitting_gap_early = 0.40
+            overfitting_gap_moderate = 0.60
+            overfitting_gap_severe = 0.80
+        else:
+            overfitting_gap_early = 0.30
+            overfitting_gap_moderate = 0.50
+            overfitting_gap_severe = 0.70
+
+        if modality == "image" and H >= 32:
+            stagnation_threshold = 0.003
+            saturation_threshold = 0.90
+            diagnosis_window = 8
+            hard_warmup_epochs = 30
+            soft_warmup_epochs = 15
+            stalled_convergence_patience = 40
+            perf_gate_tight = 1.2
+            perf_gate_loose = 1.5
+        elif modality in ("graph", "temporal_graph"):
+            stagnation_threshold = 0.005
+            saturation_threshold = 0.80
+            diagnosis_window = 5
+            hard_warmup_epochs = 3
+            soft_warmup_epochs = 2
+            stalled_convergence_patience = 25
+            perf_gate_tight = 1.5
+            perf_gate_loose = 2.0
+        elif modality in ("molecular", "molecular_classification"):
+            stagnation_threshold = 0.005
+            saturation_threshold = 0.80
+            diagnosis_window = 5
+            hard_warmup_epochs = 20
+            soft_warmup_epochs = 10
+            stalled_convergence_patience = 80
+            perf_gate_tight = 1.5
+            perf_gate_loose = 2.0
+        elif modality == "tabular":
+            stagnation_threshold = 0.005
+            saturation_threshold = 0.80
+            diagnosis_window = 5
+            hard_warmup_epochs = 20
+            soft_warmup_epochs = 10
+            stalled_convergence_patience = 50
+            perf_gate_tight = 1.5
+            perf_gate_loose = 2.0
+        else:
+            stagnation_threshold = 0.005
+            saturation_threshold = 0.80
+            diagnosis_window = 5
+            hard_warmup_epochs = 20
+            soft_warmup_epochs = 10
+            stalled_convergence_patience = 25
+            perf_gate_tight = 1.5
+            perf_gate_loose = 2.0
+
+        # ================================================================
+        #  6. Treatment
+        # ================================================================
+        if modality == "image":
+            dropout_light_p = 0.05
+            dropout_heavy_p = 0.15
+            wd_boost_factor = 1.5
+            wd_boost_max_stacks = 2
+            lr_reduce_factor = 0.7
+            lr_reduce_max_stacks = 2
+            aggressive_reg_dropout_p = 0.15
+            aggressive_reg_wd_factor = 2.0
+            aggressive_reg_lr_factor = 0.7
+        else:
+            dropout_light_p = 0.1
+            dropout_heavy_p = 0.3
+            wd_boost_factor = 2.0
+            wd_boost_max_stacks = 3
+            lr_reduce_factor = 0.5
+            lr_reduce_max_stacks = 3
+            aggressive_reg_dropout_p = 0.3
+            aggressive_reg_wd_factor = 3.0
+            aggressive_reg_lr_factor = 0.5
+
+        _stability_map = {
+            "tabular": 10, "image": 10 if H >= 32 else 6,
+            "pde": 10, "graph": 17, "temporal_graph": 15,
+            "molecular": 15, "molecular_classification": 15,
+            "pharmacogenomic": 10, "leukemia": 10,
+        }
+        stability_healthy_epochs = _stability_map.get(modality, 8)
+
+        _recovery_map = {
+            "tabular": 4, "image": 5 if H >= 32 else 3,
+            "pde": 4, "graph": 5, "temporal_graph": 5,
+            "molecular": 6, "molecular_classification": 6,
+            "pharmacogenomic": 4, "leukemia": 4,
+        }
+        recovery_epochs = _recovery_map.get(modality, 3)
+        min_recovery_epochs = max(3, recovery_epochs)
+        max_recovery_epochs = 20 if (modality == "image" and H >= 32) else 15
+        structural_recovery_multiplier = 3.0 if (modality == "image" and H >= 32) else 2.5
+
+        _escalation_map = {
+            "graph": 4, "temporal_graph": 4,
+            "molecular": 10, "molecular_classification": 10,
+            "pharmacogenomic": 4, "leukemia": 4,
+        }
+        max_treatment_escalations = _escalation_map.get(modality, 3)
+
+        _exhaustion_map = {
+            "molecular": 10, "molecular_classification": 10,
+        }
+        treatment_exhaustion_patience = _exhaustion_map.get(modality, 3)
+
+        post_stable_patience_epochs = 80 if modality == "tabular" else 30
+
+        # Molecular: disable auto-stop, longer min epochs
+        auto_stop_enabled = modality not in ("molecular", "molecular_classification")
+        stalled_convergence_min_epochs = 200 if modality in (
+            "molecular", "molecular_classification") else 40
+
+        # ================================================================
+        #  7. Augmentation
+        # ================================================================
+        if modality in ("graph", "temporal_graph", "molecular", "molecular_classification"):
+            mixup_enabled = False
+            drop_path_enabled = False
+        elif modality == "pde":
+            mixup_enabled = False
+            drop_path_enabled = True
+        else:
+            mixup_enabled = True
+            drop_path_enabled = True
+
+        mixup_alpha = 0.1 if modality == "image" else 0.2
+        physics_ops_enabled = modality == "pde"
+        amp_enabled = modality == "image"
+
+        # Image augmentation hints
+        dataset_augmented = modality == "image"
+
+        # Cutout and elastic deformation (data-level augmentation, auto-derived)
+        cutout_size = None
+        elastic_enabled = False
+        elastic_alpha = 30.0
+        elastic_sigma = 4.0
+        if modality == "image" and spatial_shape is not None:
+            if H <= 28:
+                cutout_size = 2
+                elastic_enabled = True  # handwriting-like deformation for digits
+            elif H <= 32:
+                cutout_size = 8
+            # 96x96+ (STL-10): no cutout needed
+
+        # Op gating: disabled for image (destabilises spatial pipelines)
+        op_gating_enabled = modality != "image"
+
+        # ================================================================
+        #  8. Optimizer
+        # ================================================================
+        if modality == "graph":
+            base_lr = 0.003
+            weight_decay = 0.0025
+        elif modality == "temporal_graph":
+            base_lr = 1e-3
+            weight_decay = 1e-3
+        elif modality == "image":
+            base_lr = 1e-3
+            weight_decay = 0.01
+        elif modality == "pharmacogenomic":
+            base_lr = 5e-4
+            weight_decay = 0.05
+        elif modality in ("molecular", "molecular_classification"):
+            base_lr = 3e-4
+            weight_decay = 0.01
+        elif modality == "leukemia":
+            base_lr = 1e-3
+            weight_decay = 0.01
+        else:
+            base_lr = 5e-4
+            weight_decay = 0.01
+
+        lr_controller_scale_max = 3.0 if modality in ("image", "graph", "temporal_graph") else 5.0
+
+        # ================================================================
+        #  9. Misc
+        # ================================================================
+        max_ops_per_layer = 4 if modality in (
+            "graph", "temporal_graph", "molecular",
+            "molecular_classification", "pharmacogenomic") else 16
+
+        # Graph-specific
+        if modality == "graph":
+            graph_initial_gate = 1.23
+            graph_diffusion_max_hops = 1
+        elif modality == "temporal_graph":
+            graph_initial_gate = 0.0
+            graph_diffusion_max_hops = 3
+        else:
+            graph_initial_gate = -1.0
+            graph_diffusion_max_hops = 3
+
+        # PDE surgery budgets
+        if modality == "pde" and n_samples >= 10000:
+            max_neuron_surgeries_per_interval = 16
+            max_operation_surgeries_per_interval = 3
+        else:
+            max_neuron_surgeries_per_interval = 128
+            max_operation_surgeries_per_interval = 2
+
+        # Label smoothing hint
+        label_smoothing_alpha = 0.1 if modality == "image" and d_output >= 10 else 0.1
+
+        # Graph label smoothing
+        if modality in ("graph",):
+            label_smoothing_alpha = 0.19
+
+        # ================================================================
+        #  10. Recommended batch_size and max_epochs
+        # ================================================================
+        if modality == "temporal_graph":
+            rec_batch_size = 32
+        elif modality == "image" and H >= 96:
+            rec_batch_size = 64
+        elif n_samples < 200:
+            rec_batch_size = 16
+        elif n_samples < 1000:
+            rec_batch_size = 32
+        elif n_samples < 5000:
+            rec_batch_size = 64
+        elif n_samples < 20000:
+            rec_batch_size = 128
+        elif n_samples >= 50000 and modality == "tabular":
+            rec_batch_size = 512
+        else:
+            rec_batch_size = 256
+
+        _epoch_map = {
+            "tabular": 400, "pde": 600, "graph": 300,
+            "temporal_graph": 300, "pharmacogenomic": 100,
+            "leukemia": 200, "molecular": 500,
+            "molecular_classification": 500,
+        }
+        if modality == "image":
+            rec_max_epochs = 150 if H <= 28 else 300
+        else:
+            rec_max_epochs = _epoch_map.get(modality, 300)
+
+        # ================================================================
+        #  Assemble
+        # ================================================================
+        opt = ASANNOptimizerConfig(
+            base_lr=base_lr,
+            weight_decay=weight_decay,
+            lr_controller_scale_max=lr_controller_scale_max,
+        )
+
+        cfg = cls(
+            # Architecture
+            d_init=d_init,
+            initial_num_layers=initial_num_layers,
+            # Complexity
+            complexity_target=complexity_target,
+            complexity_target_auto=complexity_target_auto,
+            complexity_target_multiplier=complexity_target_multiplier,
+            complexity_ceiling_mult=complexity_ceiling_mult,
+            hard_max_multiplier=hard_max_multiplier,
+            # Encoder
+            encoder_candidates=encoder_candidates,
+            spatial_shape=spatial_shape,
+            c_stem_init=c_stem_init,
+            spatial_downsample_stages=spatial_downsample_stages,
+            max_downsample_stages=max_downsample_stages,
+            max_channels=max_channels,
+            encoder_gnn_layers=encoder_gnn_layers,
+            encoder_switch_warmup_epochs=encoder_switch_warmup_epochs,
+            # Timing (epoch)
+            warmup_epochs=warmup_epochs,
+            surgery_epoch_interval=surgery_epoch_interval,
+            eval_epoch_interval=eval_epoch_interval,
+            meta_update_epoch_interval=meta_update_epoch_interval,
+            # Timing (step fallbacks)
+            surgery_interval_init=surgery_interval_init,
+            warmup_steps=warmup_steps,
+            meta_update_interval=meta_update_interval,
+            # Diagnosis
+            overfitting_gap_early=overfitting_gap_early,
+            overfitting_gap_moderate=overfitting_gap_moderate,
+            overfitting_gap_severe=overfitting_gap_severe,
+            stagnation_threshold=stagnation_threshold,
+            saturation_threshold=saturation_threshold,
+            diagnosis_window=diagnosis_window,
+            hard_warmup_epochs=hard_warmup_epochs,
+            soft_warmup_epochs=soft_warmup_epochs,
+            stalled_convergence_patience=stalled_convergence_patience,
+            stalled_convergence_min_epochs=stalled_convergence_min_epochs,
+            perf_gate_tight=perf_gate_tight,
+            perf_gate_loose=perf_gate_loose,
+            # Treatment
+            stability_healthy_epochs=stability_healthy_epochs,
+            recovery_epochs=recovery_epochs,
+            min_recovery_epochs=min_recovery_epochs,
+            max_recovery_epochs=max_recovery_epochs,
+            structural_recovery_multiplier=structural_recovery_multiplier,
+            max_treatment_escalations=max_treatment_escalations,
+            treatment_exhaustion_patience=treatment_exhaustion_patience,
+            post_stable_patience_epochs=post_stable_patience_epochs,
+            auto_stop_enabled=auto_stop_enabled,
+            dropout_light_p=dropout_light_p,
+            dropout_heavy_p=dropout_heavy_p,
+            wd_boost_factor=wd_boost_factor,
+            wd_boost_max_stacks=wd_boost_max_stacks,
+            lr_reduce_factor=lr_reduce_factor,
+            lr_reduce_max_stacks=lr_reduce_max_stacks,
+            aggressive_reg_dropout_p=aggressive_reg_dropout_p,
+            aggressive_reg_wd_factor=aggressive_reg_wd_factor,
+            aggressive_reg_lr_factor=aggressive_reg_lr_factor,
+            label_smoothing_alpha=label_smoothing_alpha,
+            # Augmentation
+            mixup_enabled=mixup_enabled,
+            mixup_alpha=mixup_alpha,
+            drop_path_enabled=drop_path_enabled,
+            physics_ops_enabled=physics_ops_enabled,
+            amp_enabled=amp_enabled,
+            dataset_augmented=dataset_augmented,
+            cutout_size=cutout_size,
+            elastic_enabled=elastic_enabled,
+            elastic_alpha=elastic_alpha,
+            elastic_sigma=elastic_sigma,
+            op_gating_enabled=op_gating_enabled,
+            # Surgery budgets
+            max_neuron_surgeries_per_interval=max_neuron_surgeries_per_interval,
+            max_operation_surgeries_per_interval=max_operation_surgeries_per_interval,
+            max_ops_per_layer=max_ops_per_layer,
+            # Graph
+            graph_initial_gate=graph_initial_gate,
+            graph_diffusion_max_hops=graph_diffusion_max_hops,
+            # Optimizer
+            optimizer=opt,
+            # Device
+            device=device,
+        )
+
+        # Extra attributes (not dataclass fields)
+        cfg.recommended_max_epochs = rec_max_epochs
+        cfg.recommended_batch_size = rec_batch_size
+        return cfg

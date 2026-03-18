@@ -32,7 +32,6 @@ from common import (
     resume_or_create_trainer,
 )
 from asann import ASANNConfig, ASANNModel, ASANNTrainer
-from asann.asann_optimizer import ASANNOptimizerConfig
 from tier_6.graph_utils import (
     load_traffic_preprocessed, traffic_to_asann_format, create_traffic_dataloaders,
     TrafficScaler,
@@ -140,59 +139,14 @@ def run_experiment(results_dir: str):
     d_input = split_data['d_input']    # 16 (12 window + 4 time features)
     d_output = split_data['d_output']  # 3 (ar_step_size) — predicts 3 steps at a time
 
-    config = ASANNConfig(
-        encoder_candidates=["temporal_graph"],
-        d_init=64,                     # Right-sized for 325 sensors × 12 features
-        initial_num_layers=1,          # 3 layers for graph feature propagation
-
-        # Complexity: let auto-scaling handle it.
-        complexity_target_auto=True,
-        complexity_ceiling_mult=5.0,
-        hard_max_multiplier=1.0,
-
-        # Epoch-based diagnosis — fast start for graph op discovery
-        diagnosis_enabled=True,
-        warmup_epochs=3,               # Fast diagnosis start
-        surgery_epoch_interval=2,
-        eval_epoch_interval=5,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=15,
-
-        # Traffic regression has natural train-val gaps
-        overfitting_gap_early=0.40,
-        overfitting_gap_moderate=0.60,
-        overfitting_gap_severe=0.80,
-
-        # Recovery
-        min_recovery_epochs=5,
-        max_recovery_epochs=15,
-        recovery_catastrophic_ratio=3.0,
-
-        # Allow enough escalation for graph ops
-        max_treatment_escalations=4,
-
-        # Fast warmup → graph ops prescribed early
-        hard_warmup_epochs=3,
-        soft_warmup_epochs=2,
-
-        # Graph ops config — strong graph signal for spatial correlations
-        graph_diffusion_max_hops=3,
-        graph_attention_heads=1,
-        graph_initial_gate=0.0,        # sigmoid(0)=0.5: strong spatial aggregation
-
-        # General
-        max_ops_per_layer=5,
+    config = ASANNConfig.from_task(
+        task_type="regression",
+        modality="temporal_graph",
+        d_input=d_input,
+        d_output=d_output,
+        n_samples=len(split_data['X_train']),
         device=device,
-
-        optimizer=ASANNOptimizerConfig(
-            base_lr=1e-3,              # Lower LR for regression stability
-            weight_decay=1e-3,         # Moderate regularization
-        ),
     )
-
-    # Set collapse_loss_threshold via setattr (not a ASANNConfig field,
-    # but diagnosis.py reads it via getattr with default 0.9 — too low for MSE regression)
-    config.collapse_loss_threshold = 2.0
 
     # ===== 4. Create model and attach graph data =====
     loss_fn = torch.nn.L1Loss()  # MAE loss — standard for traffic forecasting (DCRNN, D2STGNN)
@@ -234,7 +188,7 @@ def run_experiment(results_dir: str):
     _setup_graph(model)
 
     # ===== 5. Train =====
-    max_epochs = 300               # was 200 — more time for graph op discovery
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs{'  (resumed)' if is_resumed else ''}...")
     train_metrics = trainer.train_epochs(
         train_data=train_loader,

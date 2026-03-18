@@ -28,7 +28,6 @@ from common import (
     setup_paths, get_device, config_to_dict, run_experiment_wrapper,
 )
 from asann import ASANNConfig, ASANNModel, ASANNTrainer
-from asann.asann_optimizer import ASANNOptimizerConfig
 from tier_6.graph_utils import (
     load_pyg_citation, graph_data_to_asann_format, create_graph_dataloaders,
 )
@@ -108,61 +107,20 @@ def run_experiment(results_dir: str):
         x, y, masks, task_type="classification"
     )
 
-    # ===== 3. Configure ASANN (using CiteSeer Optuna-optimized config) =====
-    config = ASANNConfig(
-        encoder_candidates=["graph_node"],
-        d_init=16,
-        initial_num_layers=1,
-
-        # Complexity — tighter ceiling prevents runaway growth
-        complexity_target_auto=True,
-        complexity_ceiling_mult=2.8,
-        hard_max_multiplier=1.0,
-
-        # Surgery — moderate frequency, fast stabilization
-        diagnosis_enabled=True,
-        warmup_epochs=5,
-        surgery_epoch_interval=11,
-        eval_epoch_interval=1,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=17,
-
-        # With 60% train split, tighter overfitting detection
-        overfitting_gap_early=0.30,
-        overfitting_gap_moderate=0.50,
-        overfitting_gap_severe=0.70,
-
-        # Recovery
-        min_recovery_epochs=5,
-        max_recovery_epochs=15,
-        recovery_catastrophic_ratio=3.0,
-
-        max_treatment_escalations=4,
-
-        # Warmup
-        hard_warmup_epochs=3,
-        soft_warmup_epochs=2,
-
-        # Graph ops — moderate gate (sigmoid(1.23)=0.77)
-        graph_diffusion_max_hops=1,
-        graph_attention_heads=1,
-        graph_initial_gate=1.23,
-
-        # General
-        max_ops_per_layer=4,
-        mixup_enabled=False,
-        drop_path_enabled=False,
+    # ===== 3. Configure ASANN =====
+    d_input = data.num_features
+    d_output = num_classes
+    config = ASANNConfig.from_task(
+        task_type="classification",
+        modality="graph",
+        d_input=d_input,
+        d_output=d_output,
+        n_samples=int(masks['train'].sum()),
+        n_features=data.num_features,
         device=device,
-
-        optimizer=ASANNOptimizerConfig(
-            base_lr=0.003,
-            weight_decay=0.0025,
-        ),
     )
 
     # ===== 4. Create model and attach graph data =====
-    d_input = data.num_features
-    d_output = num_classes
     model = ASANNModel(d_input=d_input, d_output=d_output, config=config)
     model.set_graph_data(
         edge_index=graph_info['edge_index'].to(device),
@@ -191,7 +149,7 @@ def run_experiment(results_dir: str):
         task_type="classification",
     )
 
-    max_epochs = 300
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs...")
     train_metrics = trainer.train_epochs(
         train_data=train_loader,

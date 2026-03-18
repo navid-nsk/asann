@@ -63,37 +63,23 @@ def run_experiment(results_dir: str):
     # ===== 4. Split and standardize (on log-scale targets) =====
     split_data = split_and_standardize(X, y, val_ratio=0.05, test_ratio=0.10, seed=42)
 
-    # ===== 5. Create dataloaders =====
-    batch_size = 64
-    loaders = create_dataloaders(split_data, batch_size=batch_size)
-
-    # ===== 6. Configure ASANN =====
-    config = ASANNConfig(
-        d_init=48,                  # reduced from 64 -- 1,460 samples is small
-        initial_num_layers=2,
-        complexity_target=25000,    # reduced from 50000 -- prevent memorization
-
-        # Epoch-based diagnosis
-        diagnosis_enabled=True,
-        warmup_epochs=5,
-        surgery_epoch_interval=3,
-        eval_epoch_interval=2,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=10,
-        recovery_epochs=4,
-        device=device,
-
-        # Tuning for this dataset (small, tabular)
-        overfitting_gap_early=0.30,
-        overfitting_gap_moderate=0.50,
-        stalled_convergence_patience=50,
-        post_stable_patience_epochs=80,
-    )
-
-    # ===== 7. Create model and trainer =====
+    # ===== 5. Configure ASANN =====
     d_input = split_data["d_input"]
     d_output = 1
+    config = ASANNConfig.from_task(
+        task_type="regression",
+        modality="tabular",
+        d_input=d_input,
+        d_output=d_output,
+        n_samples=X.shape[0],
+        device=device,
+    )
 
+    # ===== 6. Create dataloaders =====
+    batch_size = config.recommended_batch_size
+    loaders = create_dataloaders(split_data, batch_size=batch_size)
+
+    # ===== 7. Create model and trainer =====
     def create_fresh_trainer():
         model = ASANNModel(d_input=d_input, d_output=d_output, config=config)
         model.to(device)
@@ -115,7 +101,7 @@ def run_experiment(results_dir: str):
     model = trainer.model
 
     # ===== 8. Train =====
-    max_epochs = 400
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs...")
     train_metrics = trainer.train_epochs(
         train_data=loaders["train"],

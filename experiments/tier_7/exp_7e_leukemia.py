@@ -48,7 +48,6 @@ from common import (
     resume_or_create_trainer, FocalLoss,
 )
 from asann import ASANNConfig, ASANNModel, ASANNTrainer
-from asann.asann_optimizer import ASANNOptimizerConfig
 from tier_7.bio_utils import load_munich_leukemia_data, LEUKEMIA_CLASSES
 
 
@@ -119,44 +118,22 @@ def run_experiment(results_dir: str):
         "d_input": X_train.shape[1],
     }
 
-    # ===== 3. Create mini-batch dataloaders =====
-    batch_size = 256
+    # ===== 3. Configure ASANN =====
+    config = ASANNConfig.from_task(
+        task_type="classification",
+        modality="leukemia",
+        d_input=split_data["d_input"],
+        d_output=n_classes,
+        n_samples=len(split_data["X_train"]),
+        device=device,
+    )
+    batch_size = config.recommended_batch_size
+
+    # ===== 4. Create mini-batch dataloaders =====
     loaders = create_dataloaders_classification(split_data, batch_size=batch_size)
     steps_per_epoch = len(loaders["train"])
     print(f"  DataLoaders: batch_size={batch_size}, "
           f"steps/epoch={steps_per_epoch}")
-
-    # ===== 4. Configure ASANN =====
-    config = ASANNConfig(
-        d_init=64,
-        initial_num_layers=3,
-        complexity_target_auto=True,
-        complexity_target_multiplier=5.0,
-
-        # Epoch-based diagnosis
-        diagnosis_enabled=True,
-        warmup_epochs=5,
-        surgery_epoch_interval=3,
-        eval_epoch_interval=2,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=10,
-        recovery_epochs=4,
-
-        # Relaxed overfitting thresholds -- class imbalance causes larger gaps
-        overfitting_gap_early=0.30,
-        overfitting_gap_moderate=0.60,
-
-        max_treatment_escalations=4,
-        mixup_enabled=True,
-        drop_path_enabled=True,
-        ema_enabled=True,
-
-        device=device,
-        optimizer=ASANNOptimizerConfig(
-            base_lr=1e-3,
-            weight_decay=0.01,
-        ),
-    )
 
     # ===== 5. Focal loss with capped class weights (extreme imbalance) =====
     y_train = split_data["y_train"].numpy()
@@ -200,7 +177,7 @@ def run_experiment(results_dir: str):
     model = trainer.model
 
     # ===== 7. Train =====
-    max_epochs = 200
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs "
           f"(~{max_epochs * steps_per_epoch} steps)...")
     train_metrics = trainer.train_epochs(

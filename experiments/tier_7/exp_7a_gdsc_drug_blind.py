@@ -39,7 +39,6 @@ from common import (
     resume_or_create_trainer, compute_max_epochs,
 )
 from asann import ASANNConfig, ASANNModel, ASANNTrainer
-from asann.config import ASANNOptimizerConfig
 
 
 def run_experiment(results_dir: str):
@@ -148,8 +147,19 @@ def run_experiment(results_dir: str):
     print(f"  Unique drug molecules: train={n_unique_train}, "
           f"test={n_unique_test} (ZERO overlap)")
 
-    # ===== 4. Create mini-batch dataloaders with molecule indices =====
-    batch_size = 256
+    # ===== 4. Configure ASANN with dual encoder =====
+    config = ASANNConfig.from_task(
+        task_type="regression",
+        modality="pharmacogenomic",
+        d_input=d_cell,
+        d_output=1,
+        n_samples=len(X_train),
+        device=device,
+    )
+    max_epochs = 20 if local_test else config.recommended_max_epochs
+    batch_size = config.recommended_batch_size
+
+    # ===== 5. Create mini-batch dataloaders with molecule indices =====
     n_train = len(X_train)
     n_val = len(X_val)
 
@@ -171,49 +181,6 @@ def run_experiment(results_dir: str):
     steps_per_epoch = len(loaders["train"])
     print(f"  DataLoaders: batch_size={batch_size}, "
           f"steps/epoch={steps_per_epoch}")
-
-    # ===== 5. Configure ASANN with dual encoder =====
-    max_epochs = 20 if local_test else 100
-    config = ASANNConfig(
-        encoder_candidates=["dual_drug_cell"],
-        d_init=128,
-        initial_num_layers=3,
-
-        # Dual encoder config
-        dual_encoder_cell_hidden=256,
-        dual_encoder_cell_out=64,
-        dual_encoder_drug_out=64,
-
-        # Molecular graph encoder (drug branch)
-        encoder_mol_gnn_type="gine",
-        encoder_mol_hidden_dim=64,
-        encoder_gnn_layers=3,
-        encoder_switch_warmup_epochs=10,
-
-        # Auto complexity scaling
-        complexity_target_auto=True,
-        complexity_target_multiplier=8.0,
-        complexity_ceiling_mult=5.0,
-        hard_max_multiplier=2.0,
-
-        # Epoch-based diagnosis
-        diagnosis_enabled=True,
-        warmup_epochs=5,
-        surgery_epoch_interval=3,
-        eval_epoch_interval=2,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=10,
-        recovery_epochs=4,
-
-        max_treatment_escalations=4,
-        max_ops_per_layer=4,
-
-        device=device,
-        optimizer=ASANNOptimizerConfig(
-            base_lr=5e-4,
-            weight_decay=0.05,
-        ),
-    )
 
     # ===== 6. Create model and trainer =====
     d_input = d_cell

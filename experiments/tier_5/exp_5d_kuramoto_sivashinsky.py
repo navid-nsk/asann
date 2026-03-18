@@ -45,44 +45,21 @@ def run_experiment(results_dir: str):
     # ===== 2. Split and standardize =====
     split_data = split_and_standardize(X, y, val_ratio=0.05, test_ratio=0.10, seed=42)
 
-    # ===== 3. Create dataloaders =====
-    batch_size = 256
-    loaders = create_dataloaders(split_data, batch_size=batch_size)
-
-    # ===== 4. Configure ASANN =====
-    config = ASANNConfig(
-        encoder_candidates=["linear", "fourier"],
-        d_init=64,
-        initial_num_layers=4,
-        surgery_interval_init=400,
-        warmup_steps=1000,
-        complexity_target=200000,
-        meta_update_interval=1000,
-
-        # Epoch-based diagnosis
-        diagnosis_enabled=True,
-        warmup_epochs=5,
-        surgery_epoch_interval=3,
-        eval_epoch_interval=2,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=12,
-        recovery_epochs=5,
-
-        # PDE-specific: enable physics ops for derivative/polynomial discovery
-        physics_ops_enabled=True,
-        polynomial_max_degree=3,
-        branch_count=2,
-
-        # More surgery budget for chaotic dynamics
-        max_neuron_surgeries_per_interval=16,
-        max_operation_surgeries_per_interval=3,
-
+    # ===== 3. Configure ASANN =====
+    d_input = split_data["d_input"]
+    d_output = 1
+    config = ASANNConfig.from_task(
+        task_type="regression",
+        modality="pde",
+        d_input=d_input,
+        d_output=d_output,
+        n_samples=split_data["n_train"],
         device=device,
     )
 
-    # ===== 5. Create model and trainer =====
-    d_input = split_data["d_input"]
-    d_output = 1
+    # ===== 4. Create dataloaders =====
+    batch_size = config.recommended_batch_size
+    loaders = create_dataloaders(split_data, batch_size=batch_size)
 
     def create_fresh_trainer():
         model = ASANNModel(d_input=d_input, d_output=d_output, config=config)
@@ -105,7 +82,7 @@ def run_experiment(results_dir: str):
     model = trainer.model
 
     # ===== 6. Train =====
-    max_epochs = 600
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs...")
     train_metrics = trainer.train_epochs(
         train_data=loaders["train"],

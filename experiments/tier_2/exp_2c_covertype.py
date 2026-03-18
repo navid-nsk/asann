@@ -67,34 +67,23 @@ def run_experiment(results_dir: str):
         X, y, n_classes=n_classes, val_ratio=0.05, test_ratio=0.10, seed=2
     )
 
-    # ===== 3. Create dataloaders =====
-    batch_size = 512
-    loaders = create_dataloaders_classification(split_data, batch_size=batch_size)
-
-    # ===== 4. Configure ASANN =====
-    config = ASANNConfig(
-        d_init=64,
-        initial_num_layers=1,
-        surgery_interval_init=500,
-        warmup_steps=1500,
-        complexity_target=100000,
-        meta_update_interval=1500,
-
-        # v2: Epoch-based diagnosis system
-        diagnosis_enabled=True,
-        warmup_epochs=2,
-        surgery_epoch_interval=2,
-        eval_epoch_interval=1,
-        meta_update_epoch_interval=5,
-        stability_healthy_epochs=6,
-        recovery_epochs=2,
+    # ===== 3. Configure ASANN =====
+    d_input = split_data["d_input"]
+    d_output = n_classes  # 7 classes
+    config = ASANNConfig.from_task(
+        task_type="classification",
+        modality="tabular",
+        d_input=d_input,
+        d_output=d_output,
+        n_samples=X.shape[0],
         device=device,
     )
 
-    # ===== 5. Create model and trainer =====
-    d_input = split_data["d_input"]
-    d_output = n_classes  # 7 classes
+    # ===== 4. Create dataloaders =====
+    batch_size = config.recommended_batch_size
+    loaders = create_dataloaders_classification(split_data, batch_size=batch_size)
 
+    # ===== 5. Create model and trainer =====
     # Class-weighted loss for heavily imbalanced dataset
     # Classes 0,1 are ~85% of data; class 3 is only 0.5%
     y_train = split_data["y_train"].numpy()
@@ -125,7 +114,7 @@ def run_experiment(results_dir: str):
     model = trainer.model
 
     # ===== 6. Train =====
-    max_epochs = 300
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs...")
     train_metrics = trainer.train_epochs(
         train_data=loaders["train"],

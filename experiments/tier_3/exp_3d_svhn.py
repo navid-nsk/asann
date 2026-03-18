@@ -35,7 +35,6 @@ from common import (
     resume_or_create_trainer, compute_max_epochs,
 )
 from asann import ASANNConfig, ASANNModel, ASANNTrainer
-from asann.config import ASANNOptimizerConfig
 
 
 def run_experiment(results_dir: str):
@@ -87,9 +86,20 @@ def run_experiment(results_dir: str):
     del train_float
     print(f"  Per-channel normalization: mean={channel_mean}, std={channel_std}")
 
-    # ===== 4. Create augmented dataloaders =====
+    # ===== 4. Configure ASANN =====
+    d_input = 3 * 32 * 32
+    config = ASANNConfig.from_task(
+        task_type="classification",
+        modality="image",
+        d_input=d_input,
+        d_output=n_classes,
+        n_samples=len(imgs_train),
+        spatial_shape=(3, 32, 32),
+        device=device,
+    )
+    # ===== 5. Create augmented dataloaders =====
     # SVHN: no horizontal flip (digits are not flip-invariant), use SVHN AutoAugment policy
-    batch_size = 256
+    batch_size = config.recommended_batch_size
     loaders = create_image_augmented_loaders(
         X_train_raw=imgs_train, y_train=y_train,
         X_val_raw=imgs_val, y_val=y_val,
@@ -101,7 +111,7 @@ def run_experiment(results_dir: str):
         horizontal_flip=False,  # digits should not be flipped
     )
 
-    # ===== 4b. Pre-normalized flat tensors for evaluation =====
+    # ===== 5b. Pre-normalized flat tensors for evaluation =====
     def _normalize_and_flatten(imgs_hwc, mean, std):
         f = imgs_hwc.astype(np.float32) / 255.0
         chw = f.transpose(0, 3, 1, 2)
@@ -110,47 +120,6 @@ def run_experiment(results_dir: str):
 
     X_test_tensor = torch.tensor(_normalize_and_flatten(imgs_test, channel_mean, channel_std), dtype=torch.float32)
     y_test_tensor = torch.tensor(y_test, dtype=torch.long)
-    d_input = 3 * 32 * 32
-
-    # ===== 5. Configure ASANN =====
-    config = ASANNConfig(
-        encoder_candidates=["conv", "patch_embed"],
-        spatial_shape=(3, 32, 32),
-        c_stem_init=32,               # Stronger initial capacity
-        spatial_downsample_stages=2,   # 32->16->8
-        max_channels=256,
-        initial_num_layers=4,          # Start small, self-architect as needed
-        surgery_interval_init=500,
-        warmup_steps=1500,
-        complexity_target_auto=True,
-        layer_add_cooldown_steps=3000,
-        meta_update_interval=1500,
-        amp_enabled=True,
-        torch_compile_enabled=False,
-        use_cuda_ops=True,
-        train_eval_max_batches=30,
-        dataset_augmented=True,
-        diagnosis_enabled=True,
-        warmup_epochs=3,
-        surgery_epoch_interval=2,
-        eval_epoch_interval=1,
-        meta_update_epoch_interval=5,
-        stability_healthy_epochs=6,
-        recovery_epochs=3,
-        # Augmentation tuning
-        cutout_size=4,
-        mixup_alpha=0.1,
-        # Feature toggles
-        op_gating_enabled=False,
-        spinal_enabled=False,
-        # LR tuning
-        optimizer=ASANNOptimizerConfig(
-            base_lr=1e-3,
-            lr_controller_scale_max=3.0,
-            lr_controller_dead_zone=(-0.03, 0.03),
-        ),
-        device=device,
-    )
 
     # ===== 6. Create model and trainer =====
     d_output = n_classes
@@ -175,7 +144,7 @@ def run_experiment(results_dir: str):
     model = trainer.model
 
     # ===== 7. Train =====
-    max_epochs = 150
+    max_epochs = config.recommended_max_epochs
     checkpoint_file = os.path.join(results_dir, "training_checkpoint.pt")
     print(f"\n  Training for {max_epochs} epochs...")
     train_metrics = trainer.train_epochs(

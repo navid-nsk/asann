@@ -56,37 +56,23 @@ def run_experiment(results_dir: str):
     # ===== 3. Split and standardize =====
     split_data = split_and_standardize(X, y, val_ratio=0.05, test_ratio=0.10, seed=42)
 
-    # ===== 4. Create dataloaders =====
-    batch_size = 256
-    loaders = create_dataloaders(split_data, batch_size=batch_size)
-
-    # ===== 5. Configure ASANN =====
-    config = ASANNConfig(
-        d_init=48,
-        initial_num_layers=2,
-        complexity_target=50000,    # 12 features, 17K samples -- moderate
-
-        # Epoch-based diagnosis
-        diagnosis_enabled=True,
-        warmup_epochs=5,
-        surgery_epoch_interval=3,
-        eval_epoch_interval=2,
-        meta_update_epoch_interval=10,
-        stability_healthy_epochs=10,
-        recovery_epochs=4,
-        device=device,
-
-        # Tuning for this dataset
-        overfitting_gap_early=0.30,
-        overfitting_gap_moderate=0.50,
-        stalled_convergence_patience=50,
-        post_stable_patience_epochs=80,
-    )
-
-    # ===== 6. Create model and trainer =====
+    # ===== 4. Configure ASANN =====
     d_input = split_data["d_input"]
     d_output = 1
+    config = ASANNConfig.from_task(
+        task_type="regression",
+        modality="tabular",
+        d_input=d_input,
+        d_output=d_output,
+        n_samples=X.shape[0],
+        device=device,
+    )
 
+    # ===== 5. Create dataloaders =====
+    batch_size = config.recommended_batch_size
+    loaders = create_dataloaders(split_data, batch_size=batch_size)
+
+    # ===== 6. Create model and trainer =====
     def create_fresh_trainer():
         model = ASANNModel(d_input=d_input, d_output=d_output, config=config)
         model.to(device)
@@ -108,7 +94,7 @@ def run_experiment(results_dir: str):
     model = trainer.model
 
     # ===== 7. Train =====
-    max_epochs = 400
+    max_epochs = config.recommended_max_epochs
     print(f"\n  Training for {max_epochs} epochs...")
     train_metrics = trainer.train_epochs(
         train_data=loaders["train"],
