@@ -715,6 +715,23 @@ class ASANNModel(nn.Module):
     - Memory usage and compute cost reflect the actual current architecture, always
     """
 
+    def _safe_skip_add(self, h_in, conn, source_h):
+        """Add a skip connection's output to h_in, auto-resizing the
+        spatial dimensions if they have drifted (e.g. after a stride-2
+        insertion that happened before the surgery cleanup ran).
+
+        Channel mismatches still raise (those indicate a real bug); only
+        H/W mismatches are silently bridged with adaptive_avg_pool2d.
+        """
+        src_out = conn.forward(source_h)
+        if (src_out.dim() == 4 and h_in.dim() == 4
+                and src_out.shape[-2:] != h_in.shape[-2:]):
+            import torch.nn.functional as _F_safe_skip
+            src_out = _F_safe_skip.adaptive_avg_pool2d(
+                src_out, h_in.shape[-2:])
+        return h_in + src_out
+
+
     def __init__(self, d_input: int, d_output: int, config: ASANNConfig):
         super().__init__()
         self.config = config
@@ -1531,7 +1548,7 @@ class ASANNModel(nn.Module):
                 # Skip connections still apply
                 for conn in self.connections:
                     if conn.target == l + 1:
-                        h_in = h_in + conn.forward(h[conn.source])
+                        h_in = self._safe_skip_add(h_in, conn, h[conn.source])
 
                 z = self.layers[l](h_in)
                 h[l + 1] = self.ops[l](z)
@@ -1553,7 +1570,7 @@ class ASANNModel(nn.Module):
             for conn in self.connections:
                 if conn.target == l + 1:
                     source_h = h[conn.source]
-                    h_in = h_in + conn.forward(source_h)
+                    h_in = self._safe_skip_add(h_in, conn, source_h)
 
             # Layer transformation (ASANNLayer handles spatial/flat internally)
             z = self.layers[l](h_in)
@@ -1624,7 +1641,7 @@ class ASANNModel(nn.Module):
 
                 for conn in self.connections:
                     if conn.target == l + 1:
-                        h_in = h_in + conn.forward(h[conn.source])
+                        h_in = self._safe_skip_add(h_in, conn, h[conn.source])
 
                 layer_inputs[l] = h_in
                 z = self.layers[l](h_in)
@@ -1646,6 +1663,12 @@ class ASANNModel(nn.Module):
                 if conn.target == l + 1:
                     source_h = h[conn.source]
                     conn_out = conn.forward(source_h)
+                    # Defensive auto-resize for spatial mismatch (post stride-2 insertion)
+                    if (conn_out.dim() == 4 and h_in.dim() == 4
+                            and conn_out.shape[-2:] != h_in.shape[-2:]):
+                        import torch.nn.functional as _F_safe_skip
+                        conn_out = _F_safe_skip.adaptive_avg_pool2d(
+                            conn_out, h_in.shape[-2:])
                     # Dimension check: compare last dim for flat, channel dim for spatial
                     if h_in.shape != conn_out.shape:
                         widths_in = [layer.in_features for layer in self.layers]
@@ -2083,3 +2106,8 @@ class ASANNModel(nn.Module):
         self._gradient_history.clear()
         self._layer_input_history.clear()
         self._layer_output_history.clear()
+
+
+# Backward-compatibility aliases for models saved under the old class name
+CSANNModel = ASANNModel
+CSANNLayer = ASANNLayer

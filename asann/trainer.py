@@ -431,6 +431,17 @@ class ASANNTrainer:
             self._mixup_alpha = config.mixup_alpha
             print(f"  Mixup enabled (alpha={self._mixup_alpha})")
 
+        # --- CutMix augmentation (classification only, paired with Mixup at the batch level) ---
+        self._cutmix_alpha = 0.0
+        self._cutmix_prob = 0.0
+        if (getattr(config, "cutmix_enabled", False)
+                and config.spatial_shape is not None
+                and task_type == "classification"
+                and n_classes and n_classes > 1):
+            self._cutmix_alpha = float(getattr(config, "cutmix_alpha", 1.0))
+            self._cutmix_prob = float(getattr(config, "cutmix_prob", 0.5))
+            print(f"  CutMix enabled (alpha={self._cutmix_alpha}, p={self._cutmix_prob})")
+
         # --- EMA of model weights (Polyak averaging) ---
         self._ema = None
         if config.ema_enabled:
@@ -600,10 +611,20 @@ class ASANNTrainer:
                 if self._gpu_augment_fn is not None:
                     x_batch = self._gpu_augment_fn(x_batch, self.config.spatial_shape)
 
-                # Mixup augmentation (classification only)
+                # Mixup / CutMix augmentation (classification only).
+                # If both are enabled, pick CutMix per-batch with prob self._cutmix_prob,
+                # otherwise Mixup. They are NEVER stacked on the same image.
                 mixup_lam = None
-                if self._mixup_alpha > 0 and self.model.training:
-                    x_batch, y_batch, mixup_lam = self._apply_mixup(x_batch, y_batch)
+                if self.model.training:
+                    use_cutmix = (
+                        self._cutmix_alpha > 0
+                        and self._cutmix_prob > 0
+                        and torch.rand(1).item() < self._cutmix_prob
+                    )
+                    if use_cutmix:
+                        x_batch, y_batch, mixup_lam = self._apply_cutmix(x_batch, y_batch)
+                    elif self._mixup_alpha > 0:
+                        x_batch, y_batch, mixup_lam = self._apply_mixup(x_batch, y_batch)
 
                 # ===== NORMAL TRAINING STEP =====
                 step_metrics = self._training_step(x_batch, y_batch, step, mixup_lam=mixup_lam)
@@ -1035,6 +1056,47 @@ class ASANNTrainer:
 
         return x_mixed, y_tuple, lam
 
+    def _apply_cutmix(self, x: torch.Tensor, y: torch.Tensor):
+        """Apply CutMix (Yun et al., 2019): paste a random rectangle from x[perm] into x.
+
+        Reuses the Mixup loss path: returns (x_mixed, (y_a, y_b, lam), lam) where
+        lam is the area-adjusted ratio of original-image pixels remaining.
+        Input x is a flat tensor [B, C*H*W]; reshapes to (B,C,H,W) using config.spatial_shape.
+        """
+        spatial = self.config.spatial_shape
+        if spatial is None:
+            return self._apply_mixup(x, y)
+        C, H, W = spatial
+
+        lam = torch.distributions.Beta(self._cutmix_alpha, self._cutmix_alpha).sample().item()
+        lam = max(lam, 1.0 - lam)  # primary sample dominates (matches _apply_mixup convention)
+
+        B = x.size(0)
+        perm = torch.randperm(B, device=x.device)
+
+        cut_ratio = (1.0 - lam) ** 0.5
+        cut_h = int(H * cut_ratio)
+        cut_w = int(W * cut_ratio)
+        if cut_h == 0 or cut_w == 0:
+            # Bbox collapsed — fall back to Mixup so we still augment
+            return self._apply_mixup(x, y)
+
+        cy = torch.randint(0, H, (1,)).item()
+        cx = torch.randint(0, W, (1,)).item()
+        y1 = max(cy - cut_h // 2, 0)
+        y2 = min(cy + cut_h // 2, H)
+        x1 = max(cx - cut_w // 2, 0)
+        x2 = min(cx + cut_w // 2, W)
+
+        imgs = x.view(B, C, H, W).clone()
+        imgs[:, :, y1:y2, x1:x2] = imgs[perm, :, y1:y2, x1:x2]
+        x_mixed = imgs.view(B, -1)
+
+        # Adjust lam to actual pasted area (paper formula)
+        lam = 1.0 - ((y2 - y1) * (x2 - x1)) / float(H * W)
+        y_tuple = (y, y[perm], lam)
+        return x_mixed, y_tuple, lam
+
     def _apply_balanced_sampler(self, train_data):
         """Replace the DataLoader's sampler with a moderately-balanced WeightedRandomSampler.
 
@@ -1188,7 +1250,14 @@ class ASANNTrainer:
                 h_in = h[l]
                 for conn in model.connections:
                     if conn.target == l + 1:
-                        h_in = h_in + conn.forward(h[conn.source])
+                        _src_out = conn.forward(h[conn.source])
+                        # Defensive auto-resize for spatial mismatch
+                        if (_src_out.dim() == 4 and h_in.dim() == 4
+                                and _src_out.shape[-2:] != h_in.shape[-2:]):
+                            import torch.nn.functional as _F_safe
+                            _src_out = _F_safe.adaptive_avg_pool2d(
+                                _src_out, h_in.shape[-2:])
+                        h_in = h_in + _src_out
 
                 layer_inputs[l] = h_in
                 z = model.layers[l](h_in)
@@ -2553,3 +2622,6 @@ class ASANNTrainer:
         """Helper to create a DataLoader from tensors."""
         dataset = TensorDataset(x, y)
         return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+# Backward-compat alias
+CSANNTrainer = ASANNTrainer

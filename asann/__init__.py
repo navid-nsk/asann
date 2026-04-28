@@ -50,3 +50,16 @@ __all__ = [
     "LabReport",
     "create_default_lab",
 ]
+
+# ============================================================================
+# Backward-compat class aliases: experiment scripts use the old CSANN* names
+# ============================================================================
+CSANNConfig = ASANNConfig
+CSANNOptimizerConfig = ASANNOptimizerConfig
+CSANNModel = ASANNModel
+CSANNTrainer = ASANNTrainer
+CSANNLoss = ASANNLoss
+CSANNLRController = ASANNLRController
+CSANNWarmupScheduler = ASANNWarmupScheduler
+CSANNOptimizer = ASANNOptimizer
+
