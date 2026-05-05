@@ -60,7 +60,7 @@ class ASANNOptimizerConfig:
     """
 
     # --- Base learning rate ---
-    base_lr: float = 5e-4
+    base_lr: float = 1e-3
 
     # --- Multi-scale momentum betas (fast, medium, slow, second_moment) ---
     # For tabular models, use (0.9, 0.9, 0.9, 0.999) to match standard Adam behavior.
@@ -206,6 +206,14 @@ class ASANNConfig:
     # ----- Mixup augmentation (applied in trainer for classification) -----
     mixup_alpha: float = 0.2                  # Beta distribution parameter. 0 = disabled.
     mixup_enabled: bool = True                # Enable mixup for spatial classification models
+
+    # ----- CutMix augmentation (applied in trainer for classification, paired with Mixup) -----
+    # When both mixup_enabled and cutmix_enabled are True, the trainer picks one per batch:
+    # CutMix with probability cutmix_prob, otherwise Mixup. They are NOT applied together
+    # to the same image (that would erase too much content).
+    cutmix_alpha: float = 1.0                 # Beta distribution parameter (paper default). 0 = disabled.
+    cutmix_enabled: bool = False              # Enable CutMix for spatial classification models
+    cutmix_prob: float = 0.5                  # P(CutMix | augmenting) when both Mixup and CutMix are on
 
     # ----- DropPath / Stochastic Depth (Huang et al., 2016) -----
     drop_path_rate: float = 0.1               # Max drop rate (linearly increases over depth)
@@ -848,26 +856,19 @@ class ASANNConfig:
         # ================================================================
         #  6. Treatment
         # ================================================================
-        if modality == "image":
-            dropout_light_p = 0.05
-            dropout_heavy_p = 0.15
-            wd_boost_factor = 1.5
-            wd_boost_max_stacks = 2
-            lr_reduce_factor = 0.7
-            lr_reduce_max_stacks = 2
-            aggressive_reg_dropout_p = 0.15
-            aggressive_reg_wd_factor = 2.0
-            aggressive_reg_lr_factor = 0.7
-        else:
-            dropout_light_p = 0.1
-            dropout_heavy_p = 0.3
-            wd_boost_factor = 2.0
-            wd_boost_max_stacks = 3
-            lr_reduce_factor = 0.5
-            lr_reduce_max_stacks = 3
-            aggressive_reg_dropout_p = 0.3
-            aggressive_reg_wd_factor = 3.0
-            aggressive_reg_lr_factor = 0.5
+        # Unified treatment-intensity defaults across all modalities, per
+        # paper §4.4 (dropout p in {0.1, 0.3}, WD boost 2x up to 3 stacks,
+        # LR reduce 0.5x up to 3 stacks, aggressive regularisation triple
+        # of 0.3 dropout + 3.0x WD + 0.5x LR).
+        dropout_light_p = 0.1
+        dropout_heavy_p = 0.3
+        wd_boost_factor = 2.0
+        wd_boost_max_stacks = 3
+        lr_reduce_factor = 0.5
+        lr_reduce_max_stacks = 3
+        aggressive_reg_dropout_p = 0.3
+        aggressive_reg_wd_factor = 3.0
+        aggressive_reg_lr_factor = 0.5
 
         _stability_map = {
             "tabular": 10, "image": 10 if H >= 32 else 6,
@@ -920,7 +921,12 @@ class ASANNConfig:
             mixup_enabled = True
             drop_path_enabled = True
 
-        mixup_alpha = 0.1 if modality == "image" else 0.2
+        mixup_alpha = 0.2  # Unified across modalities, per paper §4.7.
+        # CutMix is on for image classification only (paired with Mixup at the batch level).
+        # task_type filtering happens in the trainer; we just supply the modality default here.
+        cutmix_enabled = (modality == "image")
+        cutmix_alpha = 1.0
+        cutmix_prob = 0.5
         physics_ops_enabled = modality == "pde"
         amp_enabled = modality == "image"
 
@@ -946,27 +952,10 @@ class ASANNConfig:
         # ================================================================
         #  8. Optimizer
         # ================================================================
-        if modality == "graph":
-            base_lr = 0.003
-            weight_decay = 0.0025
-        elif modality == "temporal_graph":
-            base_lr = 1e-3
-            weight_decay = 1e-3
-        elif modality == "image":
-            base_lr = 1e-3
-            weight_decay = 0.01
-        elif modality == "pharmacogenomic":
-            base_lr = 5e-4
-            weight_decay = 0.05
-        elif modality in ("molecular", "molecular_classification"):
-            base_lr = 3e-4
-            weight_decay = 0.01
-        elif modality == "leukemia":
-            base_lr = 1e-3
-            weight_decay = 0.01
-        else:
-            base_lr = 5e-4
-            weight_decay = 0.01
+        # Unified base learning rate and decoupled weight decay across all
+        # modalities, per paper §4.7.
+        base_lr = 1e-3
+        weight_decay = 0.01
 
         lr_controller_scale_max = 3.0 if modality in ("image", "graph", "temporal_graph") else 5.0
 
@@ -1107,6 +1096,9 @@ class ASANNConfig:
             # Augmentation
             mixup_enabled=mixup_enabled,
             mixup_alpha=mixup_alpha,
+            cutmix_enabled=cutmix_enabled,
+            cutmix_alpha=cutmix_alpha,
+            cutmix_prob=cutmix_prob,
             drop_path_enabled=drop_path_enabled,
             physics_ops_enabled=physics_ops_enabled,
             amp_enabled=amp_enabled,
@@ -1133,3 +1125,8 @@ class ASANNConfig:
         cfg.recommended_max_epochs = rec_max_epochs
         cfg.recommended_batch_size = rec_batch_size
         return cfg
+
+
+# Backward-compatibility aliases for checkpoints saved under the old class names
+CSANNConfig = ASANNConfig
+CSANNOptimizerConfig = ASANNOptimizerConfig
